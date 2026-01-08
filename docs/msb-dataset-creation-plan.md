@@ -1,195 +1,366 @@
 # MSB Dataset Creation Plan
 
-SWE-bench compliant pipeline for creating Multi-Session Benchmark datasets.
+## Objective
 
-## Core Principle: Actual Test Execution
+Create a runnable multi-PR benchmark dataset that can be evaluated like SWE-bench.
 
-**CRITICAL**: FAIL_TO_PASS tests must be identified by actually running pytest, NOT by:
-- Parsing diff files
-- Reading CI logs
-- Inferring from test file names
+**Scope**: Dataset creation only. Memory metrics come later.
 
-## Pipeline Overview
+## Core Principle
+
+Each PR in a multi-PR sequence = one evaluation task
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  1. Scrape PRs  │────▶│  2. Run Tests   │────▶│  3. Build JSONL │
-│  from Tracker   │     │  in Docker      │     │  Dataset        │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
+Sequence: PR1 → PR2 → PR3 → PR4
+
+Evaluation:
+  Task 1: Can agent solve PR1? (pass/fail)
+  Task 2: Can agent solve PR2? (pass/fail)
+  Task 3: Can agent solve PR3? (pass/fail)
+  Task 4: Can agent solve PR4? (pass/fail)
+
+Metrics:
+  - Per-task pass rate
+  - Sequence completion rate (all tasks in sequence pass)
 ```
 
-## Step 1: Scrape PRs from Tracker Issue
-
-### Input
-- Repository: `pandas-dev/pandas`
-- Tracker Issue: `#54792` (PDEP-14)
-
-### Process
-1. Use GitHub API to fetch tracker issue
-2. Extract all PR references from issue body and timeline
-3. For each merged PR, fetch:
-   - `base_sha`: The commit BEFORE the PR was merged
-   - `patch`: The full diff of the PR
-   - `test_files_changed`: Test files modified in the PR
-
-### Output
-```python
-PRInfo(
-    number=54533,
-    base_sha="abc123...",
-    patch="diff --git a/pandas/...",
-    test_files_changed=["pandas/tests/arrays/string_/test_string_arrow.py"]
-)
-```
-
-## Step 2: Run Tests in Docker
-
-### Environment
-Use official pandas Docker setup or equivalent:
-```dockerfile
-FROM python:3.11
-RUN pip install pandas[dev] pytest hypothesis pyarrow
-```
-
-### Process for Each PR
-
-#### 2.1 Checkout Base Commit (BEFORE patch)
-```bash
-git checkout <base_sha>
-pip install -e . --no-build-isolation
-```
-
-#### 2.2 Run Tests BEFORE Patch
-```bash
-pytest <test_files_changed> --tb=short -v
-```
-Record which tests PASS and which FAIL.
-
-#### 2.3 Apply Patch
-```bash
-git apply patch.diff
-```
-
-#### 2.4 Run Tests AFTER Patch
-```bash
-pytest <test_files_changed> --tb=short -v
-```
-Record which tests PASS and which FAIL.
-
-#### 2.5 Compute FAIL_TO_PASS and PASS_TO_PASS
-```python
-# Tests that failed BEFORE but pass AFTER = FAIL_TO_PASS
-FAIL_TO_PASS = before_failed & after_passed
-
-# Tests that passed BEFORE and AFTER = PASS_TO_PASS
-PASS_TO_PASS = before_passed & after_passed
-```
-
-### Critical Validation
-
-A valid SWE-bench instance MUST have:
-1. At least 1 test in FAIL_TO_PASS (otherwise, what is the patch fixing/implementing?)
-2. PASS_TO_PASS tests should not break (regression protection)
-
-If FAIL_TO_PASS is empty:
-- The PR might not include test changes
-- The tests might already pass on base commit (test was added in different PR)
-- The PR might be pure refactoring
-
-## Step 3: Build SWE-bench Compatible JSONL
-
-### Schema (per SWE-bench spec)
+## Dataset Schema (Minimal Viable)
 
 ```json
 {
-  "instance_id": "pandas__pandas-PDEP14-001",
+  "task_id": "pandas__pandas-PDEP14-001",
+  "sequence_id": "pandas__pandas-PDEP14",
+  "sequence_position": 1,
+  "total_in_sequence": 5,
+
   "repo": "pandas-dev/pandas",
-  "base_commit": "abc123...",
-  "problem_statement": "Implement Arrow String Array with NumPy semantics...",
-  "hints_text": "",
-  "patch": "diff --git a/pandas/core/arrays/string_arrow.py ...",
-  "test_patch": "diff --git a/pandas/tests/arrays/string_/test_string_arrow.py ...",
-  "FAIL_TO_PASS": "[\"pandas/tests/arrays/string_/test_string_arrow.py::test_numpy_semantics\"]",
-  "PASS_TO_PASS": "[\"pandas/tests/arrays/string_/test_string_arrow.py::test_existing_functionality\"]",
-  "created": "2024-01-08T12:00:00Z",
-  "version": "1.0.0"
+  "pr_number": 54533,
+  "base_commit": "abc123def456...",
+
+  "problem_statement": "Issue title and description...",
+  "hints_text": "Optional hints from PR discussion...",
+
+  "patch": "diff --git a/...",
+  "test_patch": "diff --git a/pandas/tests/...",
+
+  "FAIL_TO_PASS": ["pandas/tests/arrays/string_/test_string_arrow.py::TestArrowStringArray::test_numpy_semantics"],
+  "PASS_TO_PASS": ["pandas/tests/arrays/string_/test_string.py::TestStringArray::test_basic"],
+
+  "version": "2.1.0",
+  "environment_setup_commit": "abc123def456..."
 }
 ```
 
-### MSB Extensions
+## Data Collection Pipeline
 
-Additional fields for multi-session benchmarking:
-```json
-{
-  "msb_task_id": "pandas__pandas-PDEP14",
-  "msb_sequence_number": 1,
-  "msb_total_sessions": 5,
-  "msb_depends_on": "[]",
-  "msb_enhancement_id": "PDEP-14"
-}
-```
+### Phase 1: Identify Multi-PR Sequences
 
-## Validation with Single PR
-
-Before processing entire tracker, validate pipeline with ONE PR:
-
-### Validation PR: pandas #54533
-
-This is the first PR of PDEP-14 (ArrowStringArrayNumpySemantics implementation).
-
-#### Expected Results
-- Base commit: Parent of merge commit
-- Test files: `pandas/tests/arrays/string_/test_string_arrow.py`
-- FAIL_TO_PASS: Should include new tests for ArrowStringArrayNumpySemantics
-- PASS_TO_PASS: Should include existing string array tests
-
-#### Validation Checklist
-- [ ] PR scraped successfully
-- [ ] Base commit checked out
-- [ ] Tests run BEFORE patch (some should fail)
-- [ ] Patch applied cleanly
-- [ ] Tests run AFTER patch (previously failing now pass)
-- [ ] FAIL_TO_PASS correctly identified
-- [ ] JSONL output matches SWE-bench schema
-
-## Scaling to Full Tracker
-
-After single PR validation:
-
-1. Process all merged PRs from tracker #54792
-2. Order by merge date (creates session sequence)
-3. Build dependency graph from PR cross-references
-4. Generate multi-session JSONL dataset
-
-## Error Handling
-
-### Common Issues
-
-1. **Patch doesn't apply**: Base commit might be wrong
-2. **Tests timeout**: Increase Docker timeout, use subset of tests
-3. **Missing dependencies**: Update Docker image with required packages
-4. **Flaky tests**: Run tests multiple times, use median result
-
-### Retry Strategy
+**Input**: TIER 1 repos + tracker issues
+**Output**: List of (repo, tracker_issue, enhancement_id)
 
 ```python
-MAX_RETRIES = 3
-for attempt in range(MAX_RETRIES):
-    try:
-        result = run_tests(test_files)
-        break
-    except TimeoutError:
-        if attempt == MAX_RETRIES - 1:
-            raise
-        timeout *= 2  # Exponential backoff
+TARGETS = [
+    # pandas
+    ("pandas-dev/pandas", 54792, "PDEP-14"),  # String dtype - 20+ PRs
+    ("pandas-dev/pandas", 49473, "PDEP-7"),   # Copy-on-Write - 50+ PRs
+    ("pandas-dev/pandas", 63207, "PDEP-8"),   # Inplace deprecation
+
+    # airflow
+    ("apache/airflow", None, "AIP-10"),       # Multi-stage Docker - 3 PRs
+
+    # numpy
+    ("numpy/numpy", None, "NEP-49"),          # Data allocation
+]
 ```
 
-## Usage
+### Phase 2: Extract PR Chain
 
-```bash
-# Validate with single PR
-python main.py single-pr pandas-dev pandas 54533
+For each tracker issue:
 
-# Build full dataset from tracker
-python main.py tracker pandas-dev pandas 54792 --enhancement-id PDEP-14
+1. **Find linked PRs**
+   ```python
+   # From issue timeline (cross-references)
+   # From issue body (PR mentions like #12345)
+   # From labels/milestones
+   ```
+
+2. **Filter to merged PRs only**
+   ```python
+   prs = [pr for pr in linked_prs if pr.merged_at is not None]
+   ```
+
+3. **Sort by merge date**
+   ```python
+   prs.sort(key=lambda p: p.merged_at)
+   ```
+
+4. **Get PR details**
+   ```python
+   for pr in prs:
+       pr.base_commit = get_base_commit(pr)
+       pr.patch = get_diff(pr, exclude_tests=True)
+       pr.test_patch = get_diff(pr, only_tests=True)
+       pr.files = get_changed_files(pr)
+   ```
+
+### Phase 3: Extract Problem Statement
+
+For each PR:
+
+```python
+def get_problem_statement(pr):
+    parts = []
+
+    # PR title (usually descriptive)
+    parts.append(f"# {pr.title}")
+
+    # PR body (implementation details)
+    if pr.body:
+        parts.append(pr.body)
+
+    # Linked issue if exists
+    linked_issue = find_linked_issue(pr)
+    if linked_issue:
+        parts.append(f"## Related Issue\n{linked_issue.body}")
+
+    return "\n\n".join(parts)
 ```
+
+### Phase 4: Identify FAIL_TO_PASS Tests
+
+**Strategy 1: Extract from test_patch (Primary)**
+
+```python
+def extract_new_tests(test_patch):
+    """Find test functions added in the patch."""
+    tests = []
+
+    # Parse diff to find added test functions
+    for hunk in parse_diff(test_patch):
+        if hunk.is_addition:
+            # Match: def test_xxx( or async def test_xxx(
+            matches = re.findall(r'def (test_\w+)\(', hunk.content)
+            for match in matches:
+                test_path = f"{hunk.file}::{match}"
+                tests.append(test_path)
+
+    return tests
+```
+
+**Strategy 2: Parse CI logs (If available)**
+
+```python
+def get_tests_from_ci(pr):
+    """Get test names from GitHub Actions / CI logs."""
+    # GitHub API: GET /repos/{owner}/{repo}/actions/runs
+    # Find run for PR, parse test output
+    pass
+```
+
+**Strategy 3: Infer from modified test files**
+
+```python
+def infer_affected_tests(test_patch):
+    """If a test file is modified, all tests in it might be affected."""
+    affected_files = extract_modified_files(test_patch)
+    return [f"{f}::*" for f in affected_files if '/test' in f]
+```
+
+### Phase 5: Identify PASS_TO_PASS Tests
+
+```python
+def get_pass_to_pass(pr, sequence_position, previous_prs):
+    """Tests that should continue passing."""
+
+    if sequence_position == 1:
+        # First PR: use existing tests in affected modules
+        return get_existing_tests_for_modules(pr.affected_modules)
+    else:
+        # Later PRs: include FAIL_TO_PASS from previous PRs
+        pass_to_pass = []
+        for prev_pr in previous_prs:
+            pass_to_pass.extend(prev_pr.FAIL_TO_PASS)
+        return pass_to_pass
+```
+
+### Phase 6: Validate Dataset
+
+For each task, verify:
+
+```python
+def validate_task(task):
+    errors = []
+
+    # 1. Can checkout base_commit?
+    result = run(f"git checkout {task.base_commit}")
+    if result.returncode != 0:
+        errors.append(f"Cannot checkout {task.base_commit}")
+
+    # 2. Can apply patch?
+    result = run(f"git apply --check", input=task.patch)
+    if result.returncode != 0:
+        errors.append(f"Patch does not apply cleanly")
+
+    # 3. Do FAIL_TO_PASS tests exist?
+    for test in task.FAIL_TO_PASS:
+        if not test_exists(test):
+            errors.append(f"Test not found: {test}")
+
+    # 4. Do FAIL_TO_PASS tests actually fail before patch?
+    # (This requires running tests - expensive but important)
+
+    return errors
+```
+
+## Implementation Plan
+
+### Step 1: Basic Data Collector
+```
+Input: repo, tracker_issue
+Output: List of PRs with basic info
+```
+
+### Step 2: Patch Extractor
+```
+Input: PR number
+Output: code_patch, test_patch, base_commit
+```
+
+### Step 3: Test Identifier
+```
+Input: test_patch
+Output: FAIL_TO_PASS test names
+```
+
+### Step 4: Dataset Assembler
+```
+Input: All above
+Output: JSONL file with complete tasks
+```
+
+### Step 5: Validator
+```
+Input: JSONL dataset
+Output: Validation report (which tasks are runnable)
+```
+
+## Starting Point: One Complete Example
+
+Before scaling, create ONE fully validated task:
+
+**Target**: pandas PDEP-14, first PR (#54533)
+
+```json
+{
+  "task_id": "pandas__pandas-PDEP14-001",
+  "sequence_id": "pandas__pandas-PDEP14",
+  "repo": "pandas-dev/pandas",
+  "pr_number": 54533,
+  "base_commit": "???",
+  "problem_statement": "Implement Arrow String Array with NumPy semantics...",
+  "patch": "...",
+  "test_patch": "...",
+  "FAIL_TO_PASS": ["???"],
+  "PASS_TO_PASS": ["???"],
+  "version": "2.1.0"
+}
+```
+
+**Validation checklist:**
+- [ ] Can clone pandas repo
+- [ ] Can checkout base_commit
+- [ ] Can apply patch
+- [ ] Can run FAIL_TO_PASS tests (they fail before, pass after)
+- [ ] Can run PASS_TO_PASS tests (they pass before and after)
+
+## Evaluation (SWE-bench Style)
+
+```python
+def evaluate_task(task, agent_patch):
+    """Evaluate a single task."""
+
+    # Setup
+    checkout(task.base_commit)
+    setup_environment(task.version)
+
+    # Apply agent's patch
+    apply_result = apply_patch(agent_patch)
+    if not apply_result.success:
+        return {"resolved": False, "reason": "patch_failed"}
+
+    # Run FAIL_TO_PASS tests
+    f2p_results = run_tests(task.FAIL_TO_PASS)
+    if not all(r.passed for r in f2p_results):
+        return {"resolved": False, "reason": "fail_to_pass_failed"}
+
+    # Run PASS_TO_PASS tests
+    p2p_results = run_tests(task.PASS_TO_PASS)
+    if not all(r.passed for r in p2p_results):
+        return {"resolved": False, "reason": "regression"}
+
+    return {"resolved": True}
+
+
+def evaluate_sequence(sequence_tasks, agent_patches):
+    """Evaluate a full multi-PR sequence."""
+
+    results = []
+    for task, patch in zip(sequence_tasks, agent_patches):
+        result = evaluate_task(task, patch)
+        results.append(result)
+
+    return {
+        "sequence_id": sequence_tasks[0].sequence_id,
+        "total_tasks": len(sequence_tasks),
+        "resolved_tasks": sum(1 for r in results if r["resolved"]),
+        "fully_completed": all(r["resolved"] for r in results),
+        "per_task_results": results
+    }
+```
+
+## Metrics
+
+| Metric | Formula |
+|--------|---------|
+| Task Pass Rate | resolved_tasks / total_tasks |
+| Sequence Completion Rate | sequences_fully_completed / total_sequences |
+| Position-wise Pass Rate | pass_rate at position N across all sequences |
+
+## Directory Structure
+
+```
+msb-benchmark/
+├── data/
+│   ├── raw/                    # Raw GitHub data
+│   │   ├── pandas-PDEP14/
+│   │   │   ├── pr_54533.json
+│   │   │   ├── pr_54585.json
+│   │   │   └── ...
+│   │   └── airflow-AIP10/
+│   │       └── ...
+│   ├── processed/              # Processed tasks
+│   │   └── tasks.jsonl
+│   └── validated/              # Validated subset
+│       └── tasks_validated.jsonl
+├── scripts/
+│   ├── collect.ts              # Data collection
+│   ├── process.ts              # Processing
+│   ├── validate.ts             # Validation
+│   └── evaluate.ts             # Evaluation harness
+└── configs/
+    └── targets.json            # Target repos/trackers
+```
+
+## Next Steps for Implementation
+
+1. **Update `msb-data-collector.ts`** to output this schema
+2. **Create `msb-validator.ts`** to check if tasks are runnable
+3. **Test on ONE PR** from pandas PDEP-14 end-to-end
+4. **Scale** to full sequences once validated
+
+## What NOT to Do Yet
+
+- Memory metrics (later phase)
+- Forcing multi-session behavior (not our concern)
+- Complex dependency resolution (keep it simple)
+- Cross-repo tasks (start with single repo)
