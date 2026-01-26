@@ -256,3 +256,77 @@ Global singleton providing current agent ID and skills directory to tools withou
 - `LETTA_AGENT_ID` - Override agent ID
 - `LETTA_PARENT_AGENT_ID` - Parent agent for subagents
 - `LETTA_ENABLE_LSP` - Enable LSP-enhanced Read tool
+
+---
+
+## Git Workflow (IMPORTANT)
+
+This repo is a fork. Always follow this workflow to stay synced with upstream and avoid conflicts.
+
+### Remotes Setup
+```
+origin  → letta-ai/letta-code  (upstream public repo, read-only)
+myfork  → zgrhhh/letta-code    (our fork, read-write)
+```
+
+### Branch Strategy
+- `main` - Keep clean and synced with origin (no direct work here)
+- `zgr-dev` - Our development branch (all work happens here)
+
+### Start of Session Workflow
+```bash
+# 1. Fetch latest from upstream
+git fetch origin
+
+# 2. Sync main with upstream
+git checkout main
+git merge origin/main
+git push myfork main
+
+# 3. Switch to dev branch and rebase
+git checkout zgr-dev
+git rebase main
+```
+
+### End of Session Workflow
+```bash
+# 1. Commit your work on zgr-dev
+git add .
+git commit -m "your message"
+
+# 2. Push to fork
+git push myfork zgr-dev
+
+# 3. Optionally sync main again
+git checkout main
+git fetch origin
+git merge origin/main
+git push myfork main
+```
+
+### If zgr-dev doesn't exist yet
+```bash
+git checkout -b zgr-dev
+git push -u myfork zgr-dev
+```
+
+### Resolving Rebase Conflicts
+```bash
+# If conflicts occur during rebase:
+# 1. Edit conflicted files (look for <<<<<<< markers)
+# 2. Stage resolved files
+git add <resolved-file>
+# 3. Continue rebase
+git rebase --continue
+# 4. Or abort if too messy
+git rebase --abort
+```
+
+### Quick Reference
+| Action | Command |
+|--------|---------|
+| Start session | `git fetch origin` |
+| Sync main | `git checkout main && git merge origin/main` |
+| Rebase dev | `git checkout zgr-dev && git rebase main` |
+| Push work | `git push myfork zgr-dev` |
+| Force push after rebase | `git push myfork zgr-dev --force` |
